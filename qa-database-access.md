@@ -147,38 +147,62 @@ still looks empty. Use the Query Tool instead.
 
 ## For the admin: adding and removing people
 
-**Recorded in the bib-backend repo (preferred):**
+Everything is done in the Cloud console, in the **bib-qa** project.
 
-1. Add the person to `db_developers` in `bib-backend/infra/terraform/qa.tfvars` as `"email" = "read"` (or `"write"`).
-2. Apply Terraform from `bib-backend/infra/terraform`:
-   ```
-   GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token) ~/bin/terraform apply -var-file=qa.tfvars
-   ```
-3. Grant their database access, from `bib-backend`:
-   ```
-   bash scripts/db.sh grant qa
-   ```
+**Add someone**
 
-To remove someone, delete their line and apply again.
-
-**From the Cloud console (bib-qa project):**
-
-1. **IAM & Admin → IAM → Grant access**: give their email two roles, **Cloud SQL Client** and
-   **Cloud SQL Instance User**.
+1. **IAM & Admin → IAM → Grant access**: enter their Google email and give it two roles,
+   **Cloud SQL Client** and **Cloud SQL Instance User**. Save.
 2. **SQL → bib-production → Users → Add user account → Cloud IAM**: add the same email.
-3. **SQL → bib-production → Cloud SQL Studio**: log in as `postgres` to database `bib`. The
-   password is in Secret Manager `bib-owner-database-url`, between `postgres:` and `@`. Then run
-   **one** of these:
+3. **SQL → bib-production → Cloud SQL Studio**: log in to database `bib` as user `postgres`. The
+   password is in **Secret Manager → bib-owner-database-url**, between `postgres:` and `@`. Then
+   run **one** of these:
    ```sql
    GRANT bib_dev_read TO "their.email@gmail.com";
    ```
    ```sql
    GRANT bib_owner TO "their.email@gmail.com";
    ```
-   The first is read, the second is write.
+   The first is read, the second is write. Keep the double quotes around the email.
 
-bib-backend doesn't record people added in the console. Add them to `db_developers` as well, so the
-list of who has access stays accurate.
+**Change read ↔ write:** in Cloud SQL Studio, `REVOKE` one role and `GRANT` the other, e.g.
+`REVOKE bib_owner FROM "their.email@gmail.com";` then the read `GRANT` above.
 
-How it's built (all in bib-backend): `infra/terraform/sql.tf` (public IP, no networks allowed in),
-`infra/terraform/db_access.tf` (who may connect), `scripts/db.sh` (`connect` and `grant`).
+**Remove someone:** delete their user under **SQL → bib-production → Users**, then remove their
+two roles under **IAM**.
+
+**Check who has access:** **SQL → bib-production → Users** lists every login. Run this in Cloud
+SQL Studio to see which login can do what:
+```sql
+SELECT m.rolname AS person, r.rolname AS access
+FROM pg_auth_members am
+JOIN pg_roles r ON r.oid = am.roleid
+JOIN pg_roles m ON m.oid = am.member
+WHERE r.rolname IN ('bib_dev_read', 'bib_owner') AND m.rolname LIKE '%@%';
+```
+
+**If `bib_dev_read` does not exist** (a new environment), create it once in Cloud SQL Studio as
+`postgres`. This lets it read every table, including tables added later:
+```sql
+CREATE ROLE bib_dev_read NOLOGIN;
+DO $$
+DECLARE s text; o text;
+BEGIN
+  FOR s IN SELECT nspname FROM pg_namespace
+            WHERE nspname NOT LIKE 'pg\_%' AND nspname <> 'information_schema' LOOP
+    BEGIN
+      EXECUTE format('GRANT USAGE ON SCHEMA %I TO bib_dev_read', s);
+      EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA %I TO bib_dev_read', s);
+      FOREACH o IN ARRAY ARRAY['bib_owner', 'bib_app'] LOOP
+        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT SELECT ON TABLES TO bib_dev_read', o, s);
+      END LOOP;
+    EXCEPTION WHEN insufficient_privilege THEN
+      RAISE NOTICE 'schema %: skipped (%)', s, SQLERRM;
+    END;
+  END LOOP;
+END $$;
+```
+On QA it already exists. If a migration adds a new **schema**, run the `DO` block again.
+
+How it's built (in bib-backend): `infra/terraform/sql.tf` gives the database a public IP with no
+networks allowed in and turns on Google-account logins; `scripts/db.sh` is `npm run db:qa`.
