@@ -163,30 +163,52 @@ default — but the operative reason is simpler: a JSON key in a repository
 secret is a password that works from anywhere, forever, and the token this
 workflow mints lasts an hour and is bound to this repository.
 
-- a workload identity pool and an OIDC provider for `token.actions.githubusercontent.com`,
-  **with an attribute condition pinning `assertion.repository` to
-  `anishumar/bib-backend`**. Without that condition the provider trusts every
+**Built 2026-10-21, in `bib-backend/infra/terraform/ci.tf`** (until then this
+section described a design nobody had created, and every merge to `main` from
+10 Oct ended in a red cross at the auth step). On bib-qa:
+
+- **Pool `github-actions`, provider `github`**, issuer
+  `token.actions.githubusercontent.com`. Its attribute condition accepts a token
+  only when the repository OWNER and REPOSITORY are the numeric ids of
+  `anishumar` and `anishumar/bib-backend` / `anishumar/bib-frontend` (never the
+  names, which can be re-registered), the ref is `refs/heads/main`, and the job is
+  in the `production` environment. Without a condition the provider trusts every
   repository on GitHub.
-- a deploy service account the provider may impersonate
-  (`roles/iam.workloadIdentityUser`), holding: `roles/cloudbuild.builds.editor`,
-  `roles/artifactregistry.writer`, `roles/run.developer`, and
-  `roles/iam.serviceAccountUser` on the runtime service accounts it deploys as.
-- a Cloud Build service account with `roles/artifactregistry.writer`,
-  `roles/run.developer`, `roles/logging.logWriter` and
-  `roles/iam.serviceAccountUser`.
+- **`bib-deploy`**, what the workflow becomes (`roles/iam.workloadIdentityUser`
+  for the two repository ids). It may only submit a build
+  (`roles/cloudbuild.builds.editor`, `roles/serviceusage.serviceUsageConsumer`),
+  stage its source (`roles/storage.admin` on the `bib-qa_cloudbuild` bucket
+  alone), act as `bib-build`, and read what is serving (`roles/run.viewer`).
+- **`bib-build`**, what the build runs as: `roles/run.developer` (jobs, services
+  and worker pools; no setIamPolicy), `roles/logging.logWriter`,
+  `roles/artifactregistry.writer` on the `bib` repository, read on the staging
+  bucket, and `roles/iam.serviceAccountUser` on the four runtime accounts.
+  Before it, every build ran as the compute default account, which is Editor.
 
-Then, in the repository's `production` environment, four variables (none of
-them secret — they are identifiers, and the trust policy is what makes them
-usable):
+Both workflows pass `--service-account` (the build as `bib-build`) and
+`--gcs-source-staging-dir` (so gcloud does not list the project's buckets to prove
+it owns the default one). With `logging: CLOUD_LOGGING_ONLY`, `gcloud builds
+submit` polls for the result and streams no log, so the build's output is in
+Cloud Build, never in the public Actions log.
+
+Then, in each repository, a **`production` environment** with
+**anishumar as required reviewer** and **`main` as its only branch**, and its
+variables (identifiers, not secrets; the trust policy is what makes them
+usable). `terraform output github_deploy` prints the three account values.
 
 ```
-GCP_PROJECT_ID
-GCP_REGION                    where Cloud Run and Artifact Registry live
-GCP_ARTIFACT_REPOSITORY       "bib"
-GCP_WORKLOAD_IDENTITY_PROVIDER
-GCP_DEPLOY_SERVICE_ACCOUNT
-GCP_BUILD_REGION              optional; unset means Cloud Build's "global" pool
+GCP_PROJECT_ID                 bib-qa
+GCP_REGION                     asia-south1
+GCP_BUILD_REGION               asia-south1
+GCP_ARTIFACT_REPOSITORY        bib
+GCP_WORKLOAD_IDENTITY_PROVIDER projects/933647463665/locations/global/workloadIdentityPools/github-actions/providers/github
+GCP_DEPLOY_SERVICE_ACCOUNT     bib-deploy@bib-qa.iam.gserviceaccount.com
+GCP_BUILD_SERVICE_ACCOUNT      bib-build@bib-qa.iam.gserviceaccount.com
+API_BASE_URL                   bib-frontend only: https://bib-api-thvcp4lnla-el.a.run.app
 ```
+
+**The reviewer goes on before the variables.** With the variables set and no
+reviewer, every merge deploys the minute its gate passes.
 
 ### 2.6 · One Terraform detail that will bite
 
@@ -200,7 +222,11 @@ whatever tag is written in the `.tf` file, silently and with a green plan.
 
 ## 3 · A routine deploy
 
-Merge to `main`. That is the whole procedure.
+Merge to `main`, then **approve the deploy** when it is a good moment for the
+people using the environment (a firm loading its clients is not one): Actions →
+the `deploy` run → Review deployments → Approve. The gate has already run by
+then. When both repositories changed, approve the backend first. A run left
+waiting can be rejected: the newest merge's run deploys everything before it.
 
 `deploy.yml` then runs, in this order, and stops at the first thing that fails:
 
@@ -406,9 +432,11 @@ exactly the failure §6's first boot check exists to report.
 
 `bib-frontend` is a **separate git repository**, so its source is not in the
 tarball `gcloud builds submit` uploads from this one, and neither
-`cloudbuild.yaml` nor `deploy.yml` can build it. It needs its own workflow in
-its own repository. What that workflow has to get right is short and easily got
-wrong:
+`cloudbuild.yaml` nor `deploy.yml` can build it. It has its own workflow in
+its own repository since 2026-10-21 (`bib-frontend/.github/workflows/deploy.yml`:
+typegen + check, then its `cloudbuild.yaml` as `bib-build`, behind the same
+`production` reviewer and the same pool, §2.5). What it has to get right is
+short and easily got wrong:
 
 ```
 docker build \
