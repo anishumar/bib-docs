@@ -8,6 +8,7 @@ so paths like `bib-docs/backend/DEPLOY.md` in the code's comments resolve.
 |---|---|
 | [Developer onboarding](developer-onboarding.md) | Start here: both repos, running locally, how the code is laid out, where to read next |
 | [QA database access](qa-database-access.md) | Open the QA database in pgAdmin or psql on your laptop, logging in with your Google account |
+| [Global search](global-search-plan.md) | The ⌘K search box: why Postgres and not Algolia, the API contract, the guards, and what is built |
 
 ## Backend
 
